@@ -1,8 +1,8 @@
 ---
 title: "Lab 5: Sea-Level Rise"
-author: "<Your Name (NetID)>"
+author: "<Jiayue Yin: jy152>"
 jupyter: julia-1.10
-date: 2024-02-16
+date: 2024-02-23
 
 format: 
     html: default
@@ -11,7 +11,7 @@ format:
     # COMMENT OR DELETE THE ONE YOU DON'T WANT TO USE.
     pdf:
         documentclass: article
-        fontsize: 11pt
+        fontsize: 10pt
         geometry:
             - margin=1in  
         number-sections: true
@@ -27,19 +27,6 @@ bibliography: references.bib
 ---
 
 # Setup
-
-## The usual
-
-As always:
-
-1. Clone the lab repository to your computer
-1. Open the lab repository in VS Code
-1. Open the Julia REPL and activate, then instantiate, the lab environment
-1. Make sure you can render: `quarto render template.qmd` in the terminal.
-    - If you run into issues, try running `] build IJulia` in the Julia REPL (`]` enters the package manager).
-    - If you still have issues, try opening up `blankfile.py`. That should trigger VS Code to give you the option to install the Python extension, which you should do. Then you should be able to open a menu in the bottom right of your screen to select which Python installation you want VS Code to use.
-
-
 ## Load packages
 
 ```{julia}
@@ -60,3 +47,202 @@ Plots.default(; margin=5Plots.mm)
 using Revise
 using HouseElevation
 ```
+
+## House Setup and Plot
+
+I will be using the house I chose for Lab 3. 
+The house is the Fisherman's Wharf which is a restraunt.
+There is no clear house area and house hight, I will still be using the data from previous labs. The house value should be a little bit more since it is a legacy of great seafood since the 1940s.
+
+```{julia}
+house = let
+    haz_fl_dept = CSV.read("data/haz_fl_dept.csv", DataFrame) 
+    desc = "Cafeteria Restaurant, structure"
+    row = @rsubset(haz_fl_dept, :Description == desc)[1, :] 
+    area = 750u"ft^2"
+    height_above_gauge = 4u"ft"
+    House(
+        row;
+        area=area,
+        height_above_gauge=height_above_gauge,
+        value_usd=400_000,
+    )
+end
+```
+
+```{julia}
+let
+    depths = uconvert.(u"ft", (-7.0u"ft"):(1.0u"inch"):(30.0u"ft"))
+    damages = house.ddf.(depths) ./ 100
+    damages_1000_usd = damages .* house.value_usd ./ 1000
+    scatter(
+        depths,
+        damages_1000_usd;
+        xlabel="Flood Depth",
+        ylabel="Damage (Thousand USD)",
+        label="$(house.description)\n($(house.source))",
+        legend=:bottomright,
+        size=(800, 400),
+        yformatter=:plain, # prevents scientific notation
+    )
+end
+```
+
+
+```{julia}
+elevation_cost(house, 10u"ft")
+let
+    elevations = 0u"ft":0.25u"ft":14u"ft"
+    costs = [elevation_cost(house, eᵢ) for eᵢ in elevations]
+    scatter(
+        elevations,
+        costs ./ 1_000;
+        xlabel="Elevation",
+        ylabel="Cost (Thousand USD)",
+        label="$(house.description)\n($(house.source))",
+        legend=:bottomright,
+        size=(800, 400),
+        yformatter=:plain, # prevents scientific notation
+    )
+end
+```
+
+## Sea-level rise
+
+```{julia}
+slr_scenarios = let
+    df = CSV.read("data/slr_oddo.csv", DataFrame)
+    [Oddo17SLR(a, b, c, tstar, cstar) for (a, b, c, tstar, cstar) in eachrow(df)]
+end
+println("There are $(length(slr_scenarios)) parameter sets")
+
+let
+    years = 1900:2150
+    p = plot(;
+        xlabel="Year",
+        ylabel="Mean sea-level (ft)\nwith respect to the year 2000",
+        label="Oddo et al. (2017)",
+        legend=false
+    )
+    for s in rand(slr_scenarios, 250)
+        plot!(p, years, s.(years); color=:lightgrey, alpha=0.5, linewidth=0.5)
+    end
+    p
+end
+```
+
+## Storm surge
+```{julia}
+function draw_surge_distribution()
+    μ = rand(Normal(5, 1))
+    σ = rand(Exponential(1.5))
+    ξ = rand(Normal(0.1, 0.05))
+    GeneralizedExtremeValue(μ, σ, ξ)
+end
+
+[draw_surge_distribution() for _ in 1:1000]
+```
+
+## Discount rate
+```{julia}
+function draw_discount_rate()
+    return rand(Normal(0.04, 0.02))
+end
+```
+
+## SOW
+
+```{julia}
+p = ModelParams(
+    house=house,
+    years=2024:2083
+)
+
+sow = SOW(
+    rand(slr_scenarios),
+    draw_surge_distribution(),
+    draw_discount_rate()
+)
+
+a = Action(3.0u"ft")
+
+res = run_sim(a, sow, p)
+```
+
+## large ensamble
+
+When actions = 3 ft：
+```{julia}
+sows = [SOW(rand(slr_scenarios), draw_surge_distribution(), draw_discount_rate()) for _ in 1:15] 
+actions = [Action(3.0u"ft") for _ in 1:15] 
+results = [run_sim(a, s, p) for (a, s) in zip(actions, sows)]
+```
+```{julia}
+df = DataFrame(
+    npv=results,
+    Δh_ft=[a.Δh_ft for a in actions],
+    slr_a=[s.slr.a for s in sows],
+    slr_b=[s.slr.b for s in sows],
+    slr_c=[s.slr.c for s in sows],
+    slr_tstar=[s.slr.tstar for s in sows],
+    slr_cstar=[s.slr.cstar for s in sows],
+    surge_μ=[s.surge_dist.μ for s in sows],
+    surge_σ=[s.surge_dist.σ for s in sows],
+    surge_ξ=[s.surge_dist.ξ for s in sows],
+    discount_rate=[s.discount_rate for s in sows],
+)
+df
+```
+
+```{julia}
+npv_data = [df[i, :npv] for i in 1:nrow(df)]
+scatter(npv_data, xlabel="Different runs", ylabel="NPV", legend=false)
+
+```
+
+When actions = 8 ft：
+```{julia}
+sows = [SOW(rand(slr_scenarios), draw_surge_distribution(), draw_discount_rate()) for _ in 1:15]
+actions = [Action(8.0u"ft") for _ in 1:15] # these are all the same
+results = [run_sim(a, s, p) for (a, s) in zip(actions, sows)]
+```
+
+```{julia}
+df = DataFrame(
+    npv=results,
+    Δh_ft=[a.Δh_ft for a in actions],
+    slr_a=[s.slr.a for s in sows],
+    slr_b=[s.slr.b for s in sows],
+    slr_c=[s.slr.c for s in sows],
+    slr_tstar=[s.slr.tstar for s in sows],
+    slr_cstar=[s.slr.cstar for s in sows],
+    surge_μ=[s.surge_dist.μ for s in sows],
+    surge_σ=[s.surge_dist.σ for s in sows],
+    surge_ξ=[s.surge_dist.ξ for s in sows],
+    discount_rate=[s.discount_rate for s in sows],
+)
+df
+```
+
+
+```{julia}
+npv_data = [df[i, :npv] for i in 1:nrow(df)]
+scatter(npv_data, xlabel="Different runs", ylabel="NPV", legend=false)
+
+```
+
+```{julia}
+discounts = [df[i, :discount_rate] for i in 1:nrow(df)]
+scatter(discounts, npv_data, xlabel="Discount Rate", ylabel="NPV", legend=false)
+```
+
+## results and analysis
+The 8ft lift generally achieves a lower NPV than 3ft, which can be intuitively reflected in the figure.
+At the same time, discount rate also has a great impact on NPV. We might calculate the correclation between these variables. Although The house elevation height seems to be the most important variables for NPV.
+For the model, it does not take into account the future appreciation or depreciation of the house, nor does it take into account changes in the surrounding communities. Also the future change of climate didn't take into consideration.  
+Based on the existing model, the number of simulations currently used is sufficient. If you consider adding more variables or performing more complex calculations in the future, you can consider increasing the number of simulations.
+
+
+
+
+
